@@ -1,0 +1,1 @@
+picproc is a tool to process pictures. Currently only sorts between portait and landscape photos. One day it may learn to do more.
