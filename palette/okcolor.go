@@ -143,7 +143,7 @@ func (p *LinearRGBA) Index(lc okcolor.LinearRGBA) int {
 
 func (p *LinearRGBA) From(pal color.Palette) int64 {
 	for _, col := range pal {
-		*p = append(*p, okcolor.LabModel.Convert(col).(okcolor.LinearRGBA))
+		*p = append(*p, okcolor.LinearRGBAModel.Convert(col).(okcolor.LinearRGBA))
 	}
 
 	return int64(len(pal))

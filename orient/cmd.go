@@ -3,24 +3,20 @@ package orient
 import (
 	"fmt"
 	"image"
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
+
+	"picproc/parallel"
 
 	"github.com/alecthomas/kong"
-	_ "golang.org/x/image/bmp"
-	_ "golang.org/x/image/tiff"
-	_ "golang.org/x/image/vp8l"
-	_ "golang.org/x/image/webp"
 )
 
 type OpParams struct {
 	Scan      string `help:"Source folder to scan" default:"."`
-	Portrait  string `help:"Destination folder for portrait images" default:"portrait"`
-	Landscape string `help:"Destination folder for landscape images" default:"landscape"`
+	Portrait  string `help:"Destination folder for portrait images. Relative to scan dir if not absolute." default:"portrait"`
+	Landscape string `help:"Destination folder for landscape images. Relative to scan dir if not absolute." default:"landscape"`
 }
 
 type CLICmd struct {
@@ -56,15 +52,24 @@ func (c *CLICmd) Validate(kctx *kong.Context) error {
 	if !filepath.IsAbs(conf.Portrait) {
 		conf.Portrait = filepath.Join(scanDir, conf.Portrait)
 	}
+	if conf.Portrait == conf.Scan {
+		return fmt.Errorf("source folder and portrait destination are the same")
+	}
 
 	if !filepath.IsAbs(conf.Landscape) {
 		conf.Landscape = filepath.Join(scanDir, conf.Landscape)
+	}
+	switch conf.Landscape {
+	case conf.Scan:
+		return fmt.Errorf("source folder and landscape destination are the same")
+	case conf.Portrait:
+		return fmt.Errorf("portrait and landscape destinations are the same")
 	}
 
 	return nil
 }
 
-func (c *CLICmd) Run(subCmd string) error {
+func (c *CLICmd) Run(subCmd string, worker parallel.WorkerFunc, wait parallel.WaitFunc) error {
 	var conf OpParams
 	var fileOp func(string, string) error
 	switch subCmd {
@@ -89,49 +94,65 @@ func (c *CLICmd) Run(subCmd string) error {
 		return fmt.Errorf("unable to read folder %q: %w", conf.Scan, err)
 	}
 
-	var portraitCount, landscapeCount, errCount int
+	var portraitCount, landscapeCount, errCount atomic.Uint64
 	for _, file := range files {
 		if file.IsDir() {
 			continue
 		}
 
-		name := filepath.Join(conf.Scan, file.Name())
-		img, err := os.Open(name)
-		if err != nil {
-			slog.Error("could not open image", "file", name, "error", err)
-			continue
-		}
+		worker(func(fileName string) func() {
+			return func() {
+				filePath := filepath.Join(conf.Scan, fileName)
+				imgFile, err := os.Open(filePath)
+				if err != nil {
+					errCount.Add(1)
+					slog.Error("could not open image", "file", filePath, "error", err)
+					return
+				}
 
-		imgConf, _, err := image.DecodeConfig(img)
-		if err != nil {
-			slog.Error("could not read image", "file", name, "error", err)
-			continue
-		}
-		if err = img.Close(); err != nil {
-			slog.Error("could not close image", "file", name, "error", err)
-		}
+				imgConf, _, err := image.DecodeConfig(imgFile)
+				if err != nil {
+					errCount.Add(1)
+					slog.Error("could not read image", "file", filePath, "error", err)
+					return
+				}
+				if err = imgFile.Close(); err != nil {
+					errCount.Add(1)
+					slog.Error("could not close image", "file", filePath, "error", err)
+					return
+				}
 
-		isPortrait := imgConf.Height > imgConf.Width
-		var dest string
-		if isPortrait {
-			portraitCount++
-			dest = filepath.Join(conf.Portrait, file.Name())
-		} else {
-			landscapeCount++
-			dest = filepath.Join(conf.Landscape, file.Name())
-		}
+				isPortrait := imgConf.Height > imgConf.Width
+				var dest string
+				var count *atomic.Uint64
+				if isPortrait {
+					count = &portraitCount
+					dest = filepath.Join(conf.Portrait, fileName)
+				} else {
+					count = &landscapeCount
+					dest = filepath.Join(conf.Landscape, fileName)
+				}
 
-		if err = fileOp(name, dest); err != nil {
-			errCount++
-			slog.Error("could not operate image", "from", name, "to", dest, "error", err)
-		}
+				if err = fileOp(filePath, dest); err != nil {
+					errCount.Add(1)
+					slog.Error("could not operate image", "from", filePath, "to", dest, "error", err)
+				} else {
+					(*count).Add(1)
+				}
+			}
+		}(file.Name()))
 	}
 
-	slog.Info("stats", "portraits", portraitCount, "landscapes", landscapeCount, "errors", errCount, "total",
-		portraitCount+landscapeCount)
+	wait(true)
 
-	if errCount > 0 {
-		return fmt.Errorf("error processing %d files", errCount)
+	portraits := portraitCount.Load()
+	landscapes := landscapeCount.Load()
+	errors := errCount.Load()
+	slog.Info("stats", "portraits", portraits, "landscapes", landscapes, "errors", errors,
+		"total", portraits+landscapes)
+
+	if errors > 0 {
+		return fmt.Errorf("error processing %d files", errors)
 	}
 	return nil
 }

@@ -127,6 +127,7 @@ func readPalette(r io.Reader, ident string) (color.Palette, error) {
 			R: buf4[0],
 			G: buf4[1],
 			B: buf4[2],
+			A: 0xFF,
 		}
 	}
 
